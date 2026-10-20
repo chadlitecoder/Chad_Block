@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import socket
 from pathlib import Path
 from functools import lru_cache
+from threading import RLock
 from urllib.parse import urljoin, urlparse
 
 import joblib
@@ -16,11 +18,13 @@ from flask import Flask, jsonify, request, send_from_directory
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "modelv2.joblib"
+CUSTOM_LABELS_PATH = BASE_DIR / "custom_categories.json"
 MAX_DOWNLOAD_BYTES = 2_000_000
 MAX_REDIRECTS = 5
 IDENTIFICATION_THRESHOLD = 0.25
+CUSTOM_LABELS_LOCK = RLock()
 
-app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
+app = Flask(__name__, static_folder=None)
 
 
 def is_public_web_url(url: str) -> bool:
@@ -48,6 +52,46 @@ def normalize_url(value: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValueError("Enter a valid domain, such as example.com.")
     return url
+
+
+def domain_for_url(url: str) -> str:
+    """Return the host used to associate a saved category with a site."""
+    hostname = urlparse(url).hostname
+    if not hostname:
+        raise ValueError("Could not determine the website domain.")
+    return hostname.rstrip(".").lower()
+
+
+def load_custom_labels() -> dict[str, str]:
+    """Read user-saved domain labels, returning an empty map if none exist."""
+    with CUSTOM_LABELS_LOCK:
+        try:
+            data = json.loads(CUSTOM_LABELS_PATH.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, json.JSONDecodeError):
+            app.logger.exception("Could not read saved custom categories")
+            return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        str(domain).lower(): str(category)
+        for domain, category in data.items()
+        if isinstance(domain, str) and isinstance(category, str)
+    }
+
+
+def save_custom_label(domain: str, category: str) -> None:
+    """Atomically persist one user-defined domain category."""
+    with CUSTOM_LABELS_LOCK:
+        labels = load_custom_labels()
+        labels[domain] = category
+        temporary_path = CUSTOM_LABELS_PATH.with_suffix(".json.tmp")
+        temporary_path.write_text(
+            json.dumps(labels, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        temporary_path.replace(CUSTOM_LABELS_PATH)
 
 
 def fetch_page(url: str) -> tuple[str, str, str]:
@@ -136,13 +180,27 @@ def predict():
         probability = float(scores[best_index])
         candidate_category = str(bundle["classes"][best_index])
         identified = probability >= IDENTIFICATION_THRESHOLD
+        domain = domain_for_url(final_url)
+        saved_category = load_custom_labels().get(domain) if not identified else None
+        if saved_category:
+            result_category = saved_category
+            label_source = "saved_custom"
+        elif identified:
+            result_category = candidate_category
+            label_source = "model"
+        else:
+            result_category = "Not able to identify"
+            label_source = "unknown"
 
         return jsonify({
             "url": final_url,
+            "domain": domain,
             "title": title,
-            "category": candidate_category if identified else "Not able to identify",
+            "category": result_category,
             "candidate_category": candidate_category,
             "identified": identified,
+            "saved_category": saved_category,
+            "label_source": label_source,
             "probability": probability,
             "threshold": IDENTIFICATION_THRESHOLD,
         })
@@ -155,6 +213,28 @@ def predict():
     except Exception as exc:
         app.logger.exception("Prediction failed")
         return jsonify({"error": f"Prediction failed: {exc}"}), 500
+
+
+@app.post("/api/labels")
+def save_label():
+    """Save a user-provided category for a domain for future low-score results."""
+    body = request.get_json(silent=True) or {}
+    try:
+        url = normalize_url(str(body.get("url", "")))
+        category = str(body.get("category", "")).strip()
+        if not category:
+            raise ValueError("Enter a category name.")
+        if len(category) > 60 or any(ord(character) < 32 for character in category):
+            raise ValueError("Use a category name of 60 characters or fewer.")
+
+        domain = domain_for_url(url)
+        save_custom_label(domain, category)
+        return jsonify({"domain": domain, "category": category, "saved": True})
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except OSError as exc:
+        app.logger.exception("Could not save custom category")
+        return jsonify({"error": f"Could not save the category: {exc}"}), 500
 
 
 if __name__ == "__main__":
