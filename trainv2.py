@@ -41,8 +41,10 @@ MAX_TEXT_CHARACTERS = 12_000
 # training starts. The dataset has 24 topics; this sample should contain them.
 LABEL_DISCOVERY_ROWS = 50_000
 
-# The saved model bundle will be written to this file.
-MODEL_PATH = Path("weborganizer_topic_model.joblib")
+# Resolve output relative to this script, so running it from another working
+# directory does not place the trained model in an unexpected folder.
+BASE_DIR = Path(__file__).resolve().parent
+MODEL_PATH = BASE_DIR / "weborganizer_topic_model.joblib"
 
 
 def clean_label(value):

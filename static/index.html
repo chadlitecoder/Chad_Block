@@ -53,14 +53,14 @@
     h1 { margin: 0; max-width: 12ch; font-size: clamp(36px, 7vw, 58px); letter-spacing: -.055em; line-height: 1.01; }
     .intro { margin: 19px 0 30px; max-width: 56ch; color: var(--muted); line-height: 1.7; }
     form { display: flex; gap: 11px; }
-    input {
+    input, select {
       width: 100%; min-width: 0; padding: 16px 17px;
       border: 1px solid #cbd7ce; border-radius: 14px;
       color: var(--ink); background: #fff; font: inherit; outline: none;
       transition: border-color .18s, box-shadow .18s;
     }
     input::placeholder { color: #8a9890; }
-    input:focus { border-color: var(--green); box-shadow: 0 0 0 4px rgba(36, 107, 82, .12); }
+    input:focus, select:focus { border-color: var(--green); box-shadow: 0 0 0 4px rgba(36, 107, 82, .12); }
     button {
       flex: 0 0 auto; border: 0; border-radius: 14px; padding: 0 21px;
       background: var(--green); color: white; font: inherit; font-weight: 740; cursor: pointer;
@@ -94,7 +94,7 @@
     .custom-label h3 { margin: 0; font-size: 16px; letter-spacing: -.015em; }
     .custom-label p { margin: 7px 0 13px; color: var(--muted); font-size: 13px; line-height: 1.5; }
     .custom-label-form { display: flex; gap: 9px; }
-    .custom-label-form input { padding: 12px 13px; }
+    .custom-label-form input, .custom-label-form select { padding: 12px 13px; }
     .custom-label-form button { padding: 0 16px; }
     .custom-label-status { min-height: 18px; margin: 9px 2px 0 !important; }
     footer { padding: 17px clamp(28px, 6vw, 58px); border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
@@ -122,7 +122,7 @@
 
       <p class="eyebrow">Website topic classifier · 24 categories</p>
       <h1>What’s this site about?</h1>
-      <p class="intro">Enter a website domain and the classifier will read its page and find the closest matching topic. A score under 25% is shown as “Not able to identify.”</p>
+        <p class="intro">Enter a domain to check ChadBlock’s popular-site list first. If it isn’t listed, the model classifies it once and remembers the result for next time.</p>
 
       <form id="form">
         <input id="url" name="url" type="text" placeholder="example.com" required autocomplete="url" autocapitalize="none" spellcheck="false" aria-label="Website domain or URL">
@@ -145,11 +145,12 @@
         <div class="meter-note"><span>Model score</span><span id="threshold-note">Identification cutoff: 25%</span></div>
         <p class="page-title" id="page-title"></p>
         <div class="custom-label" id="custom-label" hidden>
-          <h3>What category should this site use?</h3>
-          <p>Save your own category for this domain. If the model can’t identify it next time, ChadBlock will use your saved label.</p>
+          <h3>Set a category (optional)</h3>
+          <p>Choose a category to override the automatic result for this domain, or add your own. Your choice is saved for future visits.</p>
           <form class="custom-label-form" id="custom-label-form">
-            <input id="custom-category" name="category" type="text" maxlength="60" placeholder="e.g. Online shopping" required aria-label="Custom category">
-            <button id="save-category" type="submit">Save category</button>
+            <select id="category-choice" aria-label="Choose a category"></select>
+            <input id="custom-category" name="category" type="text" maxlength="60" placeholder="Optional: enter a new category" aria-label="New custom category">
+            <button id="save-category" type="submit">Save choice</button>
           </form>
           <p class="custom-label-status" id="custom-label-status" role="status" aria-live="polite"></p>
         </div>
@@ -167,9 +168,22 @@
     const customLabelPanel = document.querySelector("#custom-label");
     const customLabelForm = document.querySelector("#custom-label-form");
     const customCategoryInput = document.querySelector("#custom-category");
+    const categoryChoice = document.querySelector("#category-choice");
     const customLabelStatus = document.querySelector("#custom-label-status");
     const saveCategoryButton = document.querySelector("#save-category");
     let lastPrediction = null;
+
+    async function loadCategories() {
+      try {
+        const response = await fetch("/api/categories");
+        const data = await response.json();
+        categoryChoice.replaceChildren(new Option("Keep automatic category", ""));
+        for (const category of data.categories || []) categoryChoice.add(new Option(category, category));
+      } catch (_) {
+        categoryChoice.replaceChildren(new Option("Choose or enter a category", ""));
+      }
+    }
+    loadCategories();
 
     function withProtocol(value) {
       const trimmed = value.trim();
@@ -197,26 +211,34 @@
         const cutoff = (data.threshold * 100).toFixed(0);
         const identified = data.identified ?? (data.probability >= data.threshold);
         const savedCustomLabel = data.label_source === "saved_custom" || Boolean(data.saved_category);
+        const catalogLabel = data.label_source === "popular_sites";
         lastPrediction = data;
         document.querySelector("#result-label").textContent = savedCustomLabel
           ? "Your saved category"
+          : catalogLabel ? "Popular-site match"
           : identified ? "Top category" : "Low confidence";
         document.querySelector("#category").textContent = data.category;
         document.querySelector("#explanation").textContent = savedCustomLabel
-          ? `You previously saved this label for ${data.domain}. The model score is still below the ${cutoff}% cutoff.`
+          ? `You previously saved this label for ${data.domain}.`
+          : catalogLabel ? `Found in ChadBlock’s popular-site catalog for ${data.domain}.`
           : identified
             ? "The model’s highest-scoring category for this page."
             : `The top match was “${data.candidate_category},” but its score was below the ${cutoff}% cutoff.`;
         document.querySelector("#score").textContent = `${percent.toFixed(1)}%`;
         document.querySelector("#meter").setAttribute("aria-valuenow", percent.toFixed(1));
         document.querySelector("#meter-fill").style.width = `${percent}%`;
-        document.querySelector("#threshold-note").textContent = `Identification cutoff: ${cutoff}%`;
+        document.querySelector("#threshold-note").textContent = catalogLabel
+          ? "Exact catalog match · model not called"
+          : `Identification cutoff: ${cutoff}%`;
         document.querySelector("#page-title").textContent = data.title || data.url;
-        result.classList.toggle("low-confidence", !identified);
-        customLabelPanel.hidden = identified || savedCustomLabel;
-        if (savedCustomLabel) customCategoryInput.value = data.saved_category || data.category;
+        result.classList.toggle("low-confidence", !identified && !savedCustomLabel && !catalogLabel);
+        customLabelPanel.hidden = false;
+        categoryChoice.value = data.saved_category || "";
+        customCategoryInput.value = "";
+        if (data.cached) status.textContent = "Loaded your saved prediction.";
+        else if (catalogLabel) status.textContent = "Matched from the popular-site list.";
+        else status.textContent = "Classification complete.";
         result.classList.add("show");
-        status.textContent = "Classification complete.";
       } catch (error) {
         status.textContent = error.message;
       } finally {
@@ -226,14 +248,19 @@
 
     customLabelForm.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (!lastPrediction) return;
+        if (!lastPrediction) return;
+        const category = customCategoryInput.value.trim() || categoryChoice.value;
+        if (!category) {
+          customLabelStatus.textContent = "Choose a category or type a new one.";
+          return;
+        }
       saveCategoryButton.disabled = true;
       customLabelStatus.textContent = "Saving your category…";
       try {
         const response = await fetch("/api/labels", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: lastPrediction.url, category: customCategoryInput.value.trim() })
+          body: JSON.stringify({ url: lastPrediction.url, category })
         });
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "Could not save that category.");
@@ -243,9 +270,10 @@
         lastPrediction.label_source = "saved_custom";
         document.querySelector("#result-label").textContent = "Your saved category";
         document.querySelector("#category").textContent = data.category;
-        document.querySelector("#explanation").textContent = `Saved for ${data.domain}. If this domain is unidentified again, ChadBlock will use your label.`;
+        document.querySelector("#explanation").textContent = `Saved for ${data.domain}. ChadBlock will use your label on future visits.`;
         customLabelPanel.hidden = true;
         status.textContent = "Custom category saved.";
+        await loadCategories();
       } catch (error) {
         customLabelStatus.textContent = error.message;
       } finally {
