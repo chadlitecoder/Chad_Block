@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import socket
 from pathlib import Path
+from functools import lru_cache
 from urllib.parse import urljoin, urlparse
 
 import joblib
@@ -17,6 +18,7 @@ BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "modelv2.joblib"
 MAX_DOWNLOAD_BYTES = 2_000_000
 MAX_REDIRECTS = 5
+IDENTIFICATION_THRESHOLD = 0.25
 
 app = Flask(__name__, static_folder=str(BASE_DIR), static_url_path="")
 
@@ -33,6 +35,19 @@ def is_public_web_url(url: str) -> bool:
         )
     except (OSError, ValueError):
         return False
+
+
+def normalize_url(value: str) -> str:
+    """Accept a bare domain and default it to HTTPS."""
+    url = value.strip()
+    if not url:
+        raise ValueError("Enter a website domain or URL.")
+    if "://" not in url:
+        url = f"https://{url}"
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Enter a valid domain, such as example.com.")
+    return url
 
 
 def fetch_page(url: str) -> tuple[str, str, str]:
@@ -87,6 +102,7 @@ def fetch_page(url: str) -> tuple[str, str, str]:
     raise ValueError("Could not retrieve the webpage.")
 
 
+@lru_cache(maxsize=1)
 def get_model_bundle():
     if not MODEL_PATH.is_file():
         raise FileNotFoundError(
@@ -105,10 +121,9 @@ def home():
 def predict():
     body = request.get_json(silent=True) or {}
     url = str(body.get("url", "")).strip()
-    if not url:
-        return jsonify({"error": "Enter a website URL."}), 400
 
     try:
+        url = normalize_url(url)
         final_url, title, page_text = fetch_page(url)
         bundle = get_model_bundle()
         max_chars = int(bundle.get("max_text_characters", 12_000))
@@ -118,12 +133,18 @@ def predict():
         features = bundle["vectorizer"].transform([model_text])
         scores = bundle["classifier"].predict_proba(features)[0]
         best_index = int(scores.argmax())
+        probability = float(scores[best_index])
+        candidate_category = str(bundle["classes"][best_index])
+        identified = probability >= IDENTIFICATION_THRESHOLD
 
         return jsonify({
             "url": final_url,
             "title": title,
-            "category": bundle["classes"][best_index],
-            "probability": float(scores[best_index]),
+            "category": candidate_category if identified else "Not able to identify",
+            "candidate_category": candidate_category,
+            "identified": identified,
+            "probability": probability,
+            "threshold": IDENTIFICATION_THRESHOLD,
         })
     except FileNotFoundError as exc:
         return jsonify({"error": str(exc)}), 503
