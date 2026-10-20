@@ -1,6 +1,4 @@
-# Web Topic Classifier UI
-
-A local webpage that checks a curated catalog of popular websites, reuses saved predictions, and uses the WebOrganizer topic model for new domains.
+This is a prototype right now, it runs locally and it can classify sites into different categories.
 
 ## Setup
 
