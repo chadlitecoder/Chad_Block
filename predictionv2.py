@@ -1,8 +1,3 @@
-"""
-Predict WebOrganizer topics from a URL using the model saved by
-train_weborganizer.py.
-"""
-
 import argparse
 import json
 from pathlib import Path
